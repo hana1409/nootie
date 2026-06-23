@@ -1,11 +1,44 @@
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { useState } from "react";
+import axios from "axios";
 import illustration from "../assets/login-illustration.png";
 import { Mail, Lock, User } from "lucide-react";
 
 export default function Register() {
+  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const navigate = useNavigate();
+
+  const handleRegister = async () => {
+    if (!username || !email || !password) {
+      alert("Mohon lengkapi semua field");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const res = await axios.post(
+        "http://localhost:5000/api/auth/register",
+        { username, email, password }
+      );
+
+      alert(res.data.message);
+
+      // Arahkan ke halaman login, user login manual pakai username + password
+      navigate("/");
+    } catch (err) {
+      alert(err.response?.data?.message || "Register gagal");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#FAFAFA] flex items-center justify-center px-6">
-
       <div className="w-full max-w-7xl grid lg:grid-cols-2 gap-12 items-center">
 
         {/* Left */}
@@ -39,6 +72,8 @@ export default function Register() {
               <input
                 type="text"
                 placeholder="Full Name"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
                 className="w-full h-16 pl-14 rounded-2xl border border-gray-200 outline-none"
               />
             </div>
@@ -52,6 +87,8 @@ export default function Register() {
               <input
                 type="email"
                 placeholder="Email Address"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
                 className="w-full h-16 pl-14 rounded-2xl border border-gray-200 outline-none"
               />
             </div>
@@ -65,12 +102,18 @@ export default function Register() {
               <input
                 type="password"
                 placeholder="Password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
                 className="w-full h-16 pl-14 rounded-2xl border border-gray-200 outline-none"
               />
             </div>
 
-            <button className="w-full h-16 bg-[#A12259] hover:bg-[#8b1d4d] text-white rounded-2xl text-xl font-medium transition">
-              Register
+            <button
+              onClick={handleRegister}
+              disabled={loading}
+              className="w-full h-16 bg-[#A12259] hover:bg-[#8b1d4d] disabled:opacity-60 text-white rounded-2xl text-xl font-medium transition"
+            >
+              {loading ? "Loading..." : "Register"}
             </button>
 
             <div className="text-center">

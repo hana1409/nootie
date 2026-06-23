@@ -1,4 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import { useParams, useNavigate } from "react-router-dom";
+import axios from "axios";
 import {
   Hand,
   MousePointer2,
@@ -17,6 +19,8 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+
+const API_URL = "http://localhost:5000/api";
 
 // ---------- constants ----------
 
@@ -90,10 +94,18 @@ function ShapeSvg({ type, fill, stroke }) {
 // ---------- main component ----------
 
 function BoardPage() {
+  const { id: boardId } = useParams();
+  const navigate = useNavigate();
+  const token = localStorage.getItem("token");
+
   const [notes, setNotes] = useState([]);
   const [texts, setTexts] = useState([]);
   const [shapes, setShapes] = useState([]);
   const [stamps, setStamps] = useState([]);
+
+  const [boardTitle, setBoardTitle] = useState("Untitled");
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [saveStatus, setSaveStatus] = useState("idle"); // idle | saving | saved | error
 
   const [selectedId, setSelectedId] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -113,6 +125,88 @@ function BoardPage() {
   const dragRef = useRef(null);
   const resizeRef = useRef(null);
   const containerRef = useRef(null);
+  const saveTimeoutRef = useRef(null);
+  const isFirstRenderRef = useRef(true);
+
+  // ---------- load board dari database saat pertama dibuka ----------
+
+  useEffect(() => {
+    if (!token) {
+      navigate("/");
+      return;
+    }
+
+    const loadBoard = async () => {
+      try {
+        const res = await axios.get(`${API_URL}/boards/${boardId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        const board = res.data.board;
+        const data = typeof board.data === "string" ? JSON.parse(board.data) : board.data;
+
+        setBoardTitle(board.title);
+        setNotes(data?.notes || []);
+        setTexts(data?.texts || []);
+        setShapes(data?.shapes || []);
+        setStamps(data?.stamps || []);
+
+        // pastikan id counter berikutnya tidak bertabrakan dengan id yang sudah tersimpan
+        const allIds = [
+          ...(data?.notes || []),
+          ...(data?.texts || []),
+          ...(data?.shapes || []),
+          ...(data?.stamps || []),
+        ].map((el) => el.id);
+        if (allIds.length > 0) {
+          idCounter = Math.max(...allIds) + 1;
+        }
+      } catch (err) {
+        if (err.response?.status === 404) {
+          alert("Board tidak ditemukan");
+          navigate("/dashboard");
+        } else {
+          console.error(err);
+        }
+      } finally {
+        setIsLoaded(true);
+      }
+    };
+
+    loadBoard();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boardId]);
+
+  // ---------- auto-save (debounced) setiap kali isi board berubah ----------
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    if (isFirstRenderRef.current) {
+      isFirstRenderRef.current = false;
+      return;
+    }
+
+    setSaveStatus("saving");
+
+    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+
+    saveTimeoutRef.current = setTimeout(async () => {
+      try {
+        await axios.put(
+          `${API_URL}/boards/${boardId}`,
+          { data: { notes, texts, shapes, stamps } },
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        setSaveStatus("saved");
+      } catch (err) {
+        console.error("Gagal menyimpan board:", err);
+        setSaveStatus("error");
+      }
+    }, 800);
+
+    return () => clearTimeout(saveTimeoutRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notes, texts, shapes, stamps, isLoaded]);
 
   // ---------- coordinate helpers ----------
 
@@ -382,6 +476,14 @@ function BoardPage() {
       ? "cursor-crosshair"
       : "cursor-default";
 
+  if (!isLoaded) {
+    return (
+      <div className="h-screen w-screen bg-[#fafafa] flex items-center justify-center">
+        <p className="text-gray-400">Memuat board...</p>
+      </div>
+    );
+  }
+
   return (
     <div
       ref={containerRef}
@@ -614,10 +716,23 @@ function BoardPage() {
 
       {/* Header Left */}
       <div className="absolute top-8 left-8 z-10">
-        <div className="bg-white w-[180px] h-[70px] rounded-2xl shadow-md flex items-center justify-between px-5">
-          <h1 className="font-bold text-3xl text-pink-700">Nootie</h1>
-          <ChevronDown size={20} />
+        <div className="bg-white w-[220px] h-[70px] rounded-2xl shadow-md flex items-center justify-between px-5">
+          <button
+            onClick={() => navigate("/dashboard")}
+            className="text-pink-700 hover:text-pink-800"
+            title="Kembali ke dashboard"
+          >
+            <ChevronDown size={20} className="rotate-90" />
+          </button>
+          <h1 className="font-bold text-xl text-pink-700 truncate flex-1 px-2">
+            {boardTitle}
+          </h1>
         </div>
+        <p className="text-xs text-gray-400 mt-1.5 ml-2">
+          {saveStatus === "saving" && "Menyimpan..."}
+          {saveStatus === "saved" && "Tersimpan"}
+          {saveStatus === "error" && "Gagal menyimpan"}
+        </p>
       </div>
 
       {/* Header Right */}

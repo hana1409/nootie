@@ -1,8 +1,41 @@
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { useState } from "react";
+import axios from "axios";
 import illustration from "../assets/login-illustration.png";
-import { Mail, Lock } from "lucide-react";
+import { User, Lock } from "lucide-react";
 
 export default function Login() {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const navigate = useNavigate();
+
+  const handleLogin = async () => {
+    if (!username || !password) {
+      alert("Mohon lengkapi semua field");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const res = await axios.post(
+        "http://localhost:5000/api/auth/login",
+        { username, password }
+      );
+
+      localStorage.setItem("token", res.data.token);
+      localStorage.setItem("user", JSON.stringify(res.data.user));
+
+      navigate("/dashboard");
+    } catch (err) {
+      alert(err.response?.data?.message || "Login gagal");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#FAFAFA] flex items-center justify-center px-6">
 
@@ -31,14 +64,16 @@ export default function Login() {
           <div className="space-y-6">
 
             <div className="relative">
-              <Mail
+              <User
                 size={20}
                 className="absolute left-5 top-1/2 -translate-y-1/2 text-gray-400"
               />
 
               <input
-                type="email"
-                placeholder="Email Address"
+                type="text"
+                placeholder="Username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
                 className="w-full h-16 pl-14 rounded-2xl border border-gray-200 outline-none"
               />
             </div>
@@ -52,12 +87,18 @@ export default function Login() {
               <input
                 type="password"
                 placeholder="Password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
                 className="w-full h-16 pl-14 rounded-2xl border border-gray-200 outline-none"
               />
             </div>
 
-            <button className="w-full h-16 bg-[#A12259] hover:bg-[#8b1d4d] text-white rounded-2xl text-xl font-medium transition">
-              Login
+            <button
+              onClick={handleLogin}
+              disabled={loading}
+              className="w-full h-16 bg-[#A12259] hover:bg-[#8b1d4d] disabled:opacity-60 text-white rounded-2xl text-xl font-medium transition"
+            >
+              {loading ? "Loading..." : "Login"}
             </button>
 
             <div className="text-center text-gray-500 cursor-pointer">
