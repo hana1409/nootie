@@ -680,7 +680,7 @@ function BoardPage() {
       onWheel={handleWheel}
     >
       {/* ✨ BARU: ACTIVITY LOG PANEL KIRI */}
-      <div className="absolute left-8 top-24 z-10 bg-white rounded-2xl shadow-md w-64 h-96 flex flex-col">
+      <div className="absolute left-8 top-40 z-10 bg-white rounded-2xl shadow-md w-64 h-96 flex flex-col">
         <div className="px-5 py-4 border-b border-gray-200">
           <h2 className="text-sm font-bold text-gray-700">📋 Activity</h2>
         </div>
