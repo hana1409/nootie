@@ -1,6 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import axios from "axios";
+import { io } from "socket.io-client";
+import { API_URL, SOCKET_URL } from "../config";
 import {
   Hand,
   MousePointer2,
@@ -20,7 +22,7 @@ import {
   X,
 } from "lucide-react";
 
-const API_URL = "http://localhost:5000/api";
+
 
 // ---------- constants ----------
 
@@ -103,9 +105,15 @@ function BoardPage() {
   const [shapes, setShapes] = useState([]);
   const [stamps, setStamps] = useState([]);
 
+  const [onlineUsers, setOnlineUsers] = useState([]);
+  const [remoteCursors, setRemoteCursors] = useState({});
+  const [activityLog, setActivityLog] = useState([]); // ✨ BARU: activity log
+  const [showOnlineDropdown, setShowOnlineDropdown] = useState(false); // ✨ BARU: toggle dropdown
+  const [usersEditing, setUsersEditing] = useState({}); // ✨ BARU: { elementId: { username, kind } } - track siapa yg sedang edit
+  
   const [boardTitle, setBoardTitle] = useState("Untitled");
   const [isLoaded, setIsLoaded] = useState(false);
-  const [saveStatus, setSaveStatus] = useState("idle"); // idle | saving | saved | error
+  const [saveStatus, setSaveStatus] = useState("idle");
 
   const [selectedId, setSelectedId] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -127,6 +135,10 @@ function BoardPage() {
   const containerRef = useRef(null);
   const saveTimeoutRef = useRef(null);
   const isFirstRenderRef = useRef(true);
+  const socketRef = useRef(null);
+  const skipBroadcastRef = useRef(false);
+  const usernameRef = useRef("Anonim");
+  const activityLogRef = useRef(null); // ✨ BARU: ref untuk scroll ke bawah
 
   // ---------- load board dari database saat pertama dibuka ----------
 
@@ -151,7 +163,6 @@ function BoardPage() {
         setShapes(data?.shapes || []);
         setStamps(data?.stamps || []);
 
-        // pastikan id counter berikutnya tidak bertabrakan dengan id yang sudah tersimpan
         const allIds = [
           ...(data?.notes || []),
           ...(data?.texts || []),
@@ -174,10 +185,128 @@ function BoardPage() {
     };
 
     loadBoard();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boardId]);
 
-  // ---------- auto-save (debounced) setiap kali isi board berubah ----------
+  useEffect(() => {
+    const storedUser = localStorage.getItem("user");
+    const username = storedUser ? JSON.parse(storedUser).username : "Anonim";
+    usernameRef.current = username;
+
+    socketRef.current = io(SOCKET_URL);
+
+    socketRef.current.emit("join-board", {
+      boardId,
+      username,
+    });
+
+    socketRef.current.on("users-online", (users) => {
+      setOnlineUsers(users);
+    });
+
+    socketRef.current.on("board-update", ({ data, username }) => {
+      skipBroadcastRef.current = true;
+      setNotes(data.notes || []);
+      setTexts(data.texts || []);
+      setShapes(data.shapes || []);
+      setStamps(data.stamps || []);
+
+      const allIds = [
+        ...(data.notes || []),
+        ...(data.texts || []),
+        ...(data.shapes || []),
+        ...(data.stamps || []),
+      ].map((el) => el.id);
+      if (allIds.length > 0) {
+        idCounter = Math.max(idCounter, Math.max(...allIds) + 1);
+      }
+    });
+
+    socketRef.current.on("cursor-move", ({ socketId, x, y, username }) => {
+      setRemoteCursors((prev) => ({
+        ...prev,
+        [socketId]: { x, y, username },
+      }));
+    });
+
+    socketRef.current.on("cursor-leave", ({ socketId }) => {
+      setRemoteCursors((prev) => {
+        const next = { ...prev };
+        delete next[socketId];
+        return next;
+      });
+    });
+
+    // ✨ BARU: listen activity log dari server
+    socketRef.current.on("activity", ({ username, action, timestamp }) => {
+      const now = new Date(timestamp);
+      const timeStr = now.toLocaleTimeString("id-ID", { 
+        hour: "2-digit", 
+        minute: "2-digit" 
+      });
+      
+      setActivityLog((prev) => [
+        ...prev,
+        { id: Date.now(), username, action, time: timeStr },
+      ].slice(-20)); // limit 20 items terbaru
+    });
+
+    // ✨ BARU: listen ketika user lain sedang edit text/note
+    socketRef.current.on("user-editing", ({ elementId, username, kind, isEditing }) => {
+      setUsersEditing((prev) => {
+        const next = { ...prev };
+        if (isEditing) {
+          next[elementId] = { username, kind };
+        } else {
+          delete next[elementId];
+        }
+        return next;
+      });
+    });
+
+    // ✨ BARU: listen perubahan text real-time dari user lain
+    socketRef.current.on("text-updated", ({ elementId, text }) => {
+      skipBroadcastRef.current = true;
+      setTexts((arr) => arr.map((t) => (t.id === elementId ? { ...t, text } : t)));
+    });
+
+    // ✨ BARU: listen perubahan note real-time dari user lain
+    socketRef.current.on("note-updated", ({ elementId, text }) => {
+      skipBroadcastRef.current = true;
+      setNotes((arr) => arr.map((n) => (n.id === elementId ? { ...n, text } : n)));
+    });
+
+    return () => {
+      socketRef.current.disconnect();
+    };
+  }, [boardId]);
+
+  // ✨ BARU: scroll activity log ke bawah saat ada item baru
+  useEffect(() => {
+    if (activityLogRef.current) {
+      setTimeout(() => {
+        activityLogRef.current.scrollTop = activityLogRef.current.scrollHeight;
+      }, 0);
+    }
+  }, [activityLog]);
+
+  // ---------- broadcast realtime ke user lain setiap kali board berubah ----------
+
+  useEffect(() => {
+    if (!isLoaded) return;
+
+    if (skipBroadcastRef.current) {
+      skipBroadcastRef.current = false;
+      return;
+    }
+
+    socketRef.current?.emit("board-update", {
+      boardId,
+      data: { notes, texts, shapes, stamps },
+      username: usernameRef.current,
+    });
+  }, [notes, texts, shapes, stamps]);
+
+  // ---------- auto-save (debounced) ke database ----------
 
   useEffect(() => {
     if (!isLoaded) return;
@@ -205,7 +334,6 @@ function BoardPage() {
     }, 800);
 
     return () => clearTimeout(saveTimeoutRef.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [notes, texts, shapes, stamps, isLoaded]);
 
   // ---------- coordinate helpers ----------
@@ -239,6 +367,14 @@ function BoardPage() {
         text: "",
       },
     ]);
+    
+    // ✨ BARU: emit activity
+    socketRef.current?.emit("activity", {
+      boardId,
+      username: usernameRef.current,
+      action: "added sticky note",
+    });
+    
     setSelectedId({ kind: "note", id });
     setEditingId({ kind: "note", id });
   };
@@ -246,8 +382,16 @@ function BoardPage() {
   const createTextAt = (x, y) => {
     const id = nextId();
     setTexts((t) => [...t, { id, x, y, w: 220, text: "", size: 20 }]);
+    
+    // ✨ BARU: emit activity
+    socketRef.current?.emit("activity", {
+      boardId,
+      username: usernameRef.current,
+      action: "added text",
+    });
+    
     setSelectedId({ kind: "text", id });
-    setEditingId({ kind: "text", id });
+    setEditingId({ kind: "text", id }); // ✨ Langsung buka editor
   };
 
   const createShapeAt = (x, y, type) => {
@@ -264,12 +408,28 @@ function BoardPage() {
         fill: SHAPE_FILLS[(id - 1) % SHAPE_FILLS.length],
       },
     ]);
+    
+    // ✨ BARU: emit activity
+    socketRef.current?.emit("activity", {
+      boardId,
+      username: usernameRef.current,
+      action: `added ${type}`,
+    });
+    
     setSelectedId({ kind: "shape", id });
   };
 
   const createStampAt = (x, y, emoji) => {
     const id = nextId();
     setStamps((s) => [...s, { id, x: x - 24, y: y - 24, emoji }]);
+    
+    // ✨ BARU: emit activity
+    socketRef.current?.emit("activity", {
+      boardId,
+      username: usernameRef.current,
+      action: `added emoji ${emoji}`,
+    });
+    
     setSelectedId({ kind: "stamp", id });
   };
 
@@ -305,6 +465,14 @@ function BoardPage() {
   };
 
   const handleBackgroundMouseMove = (e) => {
+    const worldCursor = screenToWorld(e.clientX, e.clientY);
+    socketRef.current?.emit("cursor-move", {
+      boardId,
+      x: worldCursor.x,
+      y: worldCursor.y,
+      username: usernameRef.current,
+    });
+
     if (isPanning) {
       setCanvasPos({ x: e.clientX - startPan.x, y: e.clientY - startPan.y });
       return;
@@ -357,6 +525,21 @@ function BoardPage() {
   const deleteSelected = useCallback(() => {
     if (!selectedId) return;
     const { kind, id } = selectedId;
+    
+    // ✨ BARU: emit activity sebelum delete
+    const typeLabel = {
+      note: "sticky note",
+      text: "text",
+      shape: "shape",
+      stamp: "emoji",
+    }[kind] || kind;
+    
+    socketRef.current?.emit("activity", {
+      boardId,
+      username: usernameRef.current,
+      action: `deleted ${typeLabel}`,
+    });
+    
     if (kind === "note") setNotes((arr) => arr.filter((n) => n.id !== id));
     if (kind === "text") setTexts((arr) => arr.filter((t) => t.id !== id));
     if (kind === "shape") setShapes((arr) => arr.filter((s) => s.id !== id));
@@ -383,6 +566,7 @@ function BoardPage() {
         setSelectedId(null);
         setShowShapeMenu(false);
         setShowEmojiMenu(false);
+        setShowOnlineDropdown(false); // ✨ BARU
         setSelectedTool("pointer");
       }
       if (e.key === "v" && !isEditingText) setSelectedTool("pointer");
@@ -432,6 +616,7 @@ function BoardPage() {
   const onToolClick = (tool) => {
     setShowShapeMenu(false);
     setShowEmojiMenu(false);
+    setShowOnlineDropdown(false); // ✨ BARU
     if (tool === "shapes") {
       setSelectedTool("shapes");
       setShowShapeMenu(true);
@@ -494,6 +679,29 @@ function BoardPage() {
       onMouseLeave={endInteractions}
       onWheel={handleWheel}
     >
+      {/* ✨ BARU: ACTIVITY LOG PANEL KIRI */}
+      <div className="absolute left-8 top-24 z-10 bg-white rounded-2xl shadow-md w-64 h-96 flex flex-col">
+        <div className="px-5 py-4 border-b border-gray-200">
+          <h2 className="text-sm font-bold text-gray-700">📋 Activity</h2>
+        </div>
+        <div 
+          ref={activityLogRef}
+          className="flex-1 overflow-y-auto px-4 py-3 space-y-2"
+        >
+          {activityLog.length === 0 ? (
+            <p className="text-xs text-gray-400 text-center py-8">No activity yet</p>
+          ) : (
+            activityLog.map((log) => (
+              <div key={log.id} className="text-xs border-l-2 border-pink-500 pl-2 py-1">
+                <p className="font-medium text-gray-700">{log.username}</p>
+                <p className="text-gray-500">{log.action}</p>
+                <p className="text-gray-400 text-xs">{log.time}</p>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
       {/* CANVAS */}
       <div
         className="absolute inset-0 origin-top-left"
@@ -533,6 +741,11 @@ function BoardPage() {
                       e.stopPropagation();
                       setShapes((arr) => arr.filter((s) => s.id !== shape.id));
                       setSelectedId(null);
+                      socketRef.current?.emit("activity", {
+                        boardId,
+                        username: usernameRef.current,
+                        action: "deleted shape",
+                      });
                     }}
                     className="absolute -top-4 -right-4 bg-white rounded-full shadow p-1 text-gray-500 hover:text-red-500"
                   >
@@ -552,6 +765,8 @@ function BoardPage() {
         {notes.map((note) => {
           const isSelected = selectedId?.kind === "note" && selectedId.id === note.id;
           const isEditing = editingId?.kind === "note" && editingId.id === note.id;
+          const isEditingByOther = usersEditing[note.id] && usersEditing[note.id].kind === "note";
+          
           return (
             <div
               key={note.id}
@@ -561,28 +776,62 @@ function BoardPage() {
               onDoubleClick={(e) => {
                 e.stopPropagation();
                 setEditingId({ kind: "note", id: note.id });
+                socketRef.current?.emit("user-editing", {
+                  boardId,
+                  elementId: note.id,
+                  username: usernameRef.current,
+                  kind: "note",
+                  isEditing: true,
+                });
               }}
             >
               <div
-                className={`w-full h-full rounded-2xl shadow-md p-4 flex flex-col ${isSelected ? "ring-2 ring-pink-500 ring-offset-2" : ""}`}
+                className={`w-full h-full rounded-2xl shadow-md p-4 flex flex-col relative ${isSelected ? "ring-2 ring-pink-500 ring-offset-2" : ""} ${isEditingByOther ? "ring-2 ring-blue-400 ring-offset-2" : ""}`}
                 style={{ backgroundColor: note.color }}
               >
                 {isEditing ? (
                   <textarea
                     autoFocus
                     value={note.text}
-                    onChange={(e) =>
-                      setNotes((arr) => arr.map((n) => (n.id === note.id ? { ...n, text: e.target.value } : n)))
-                    }
+                    onChange={(e) => {
+                      const newText = e.target.value;
+                      setNotes((arr) => arr.map((n) => (n.id === note.id ? { ...n, text: newText } : n)));
+                      
+                      // ✨ Broadcast note changes real-time
+                      socketRef.current?.emit("note-edit", {
+                        boardId,
+                        elementId: note.id,
+                        text: newText,
+                        username: usernameRef.current,
+                      });
+                    }}
                     onMouseDown={(e) => e.stopPropagation()}
-                    onBlur={() => setEditingId(null)}
+                    onBlur={() => {
+                      setEditingId(null);
+                      socketRef.current?.emit("user-editing", {
+                        boardId,
+                        elementId: note.id,
+                        username: usernameRef.current,
+                        kind: "note",
+                        isEditing: false,
+                      });
+                    }}
                     className="w-full h-full bg-transparent resize-none outline-none text-gray-800 font-medium text-base leading-snug"
                     placeholder="Type something..."
                   />
                 ) : (
-                  <p className="w-full h-full whitespace-pre-wrap break-words text-gray-800 font-medium text-base leading-snug overflow-hidden">
-                    {note.text || <span className="text-gray-800/40">Double-click to edit</span>}
-                  </p>
+                  <>
+                    <p className="w-full flex-1 whitespace-pre-wrap break-words text-gray-800 font-medium text-base leading-snug overflow-hidden">
+                      {note.text || <span className="text-gray-800/40">Double-click to edit</span>}
+                    </p>
+                    
+                    {/* ✨ Indicator: siapa yang sedang edit */}
+                    {isEditingByOther && (
+                      <p className="text-xs text-blue-600 mt-2 font-medium">
+                        ✏️ {usersEditing[note.id].username}
+                      </p>
+                    )}
+                  </>
                 )}
               </div>
 
@@ -611,6 +860,11 @@ function BoardPage() {
                       onClick={() => {
                         setNotes((arr) => arr.filter((n) => n.id !== note.id));
                         setSelectedId(null);
+                        socketRef.current?.emit("activity", {
+                          boardId,
+                          username: usernameRef.current,
+                          action: "deleted sticky note",
+                        });
                       }}
                       className="text-gray-400 hover:text-red-500 p-0.5"
                     >
@@ -631,6 +885,8 @@ function BoardPage() {
         {texts.map((t) => {
           const isSelected = selectedId?.kind === "text" && selectedId.id === t.id;
           const isEditing = editingId?.kind === "text" && editingId.id === t.id;
+          const isEditingByOther = usersEditing[t.id] && usersEditing[t.id].kind === "text";
+          
           return (
             <div
               key={t.id}
@@ -640,20 +896,45 @@ function BoardPage() {
               onDoubleClick={(e) => {
                 e.stopPropagation();
                 setEditingId({ kind: "text", id: t.id });
+                socketRef.current?.emit("user-editing", {
+                  boardId,
+                  elementId: t.id,
+                  username: usernameRef.current,
+                  kind: "text",
+                  isEditing: true,
+                });
               }}
             >
-              <div className={`rounded-md px-1 ${isSelected ? "ring-2 ring-pink-500 ring-offset-2" : ""}`}>
+              <div className={`rounded-md px-1 ${isSelected ? "ring-2 ring-pink-500 ring-offset-2" : ""} ${isEditingByOther ? "ring-2 ring-blue-400 ring-offset-2" : ""}`}>
                 {isEditing ? (
                   <textarea
                     autoFocus
                     value={t.text}
-                    onChange={(e) =>
-                      setTexts((arr) => arr.map((tt) => (tt.id === t.id ? { ...tt, text: e.target.value } : tt)))
-                    }
+                    onChange={(e) => {
+                      const newText = e.target.value;
+                      setTexts((arr) => arr.map((tt) => (tt.id === t.id ? { ...tt, text: newText } : tt)));
+                      
+                      // ✨ Broadcast text changes real-time
+                      socketRef.current?.emit("text-edit", {
+                        boardId,
+                        elementId: t.id,
+                        text: newText,
+                        username: usernameRef.current,
+                      });
+                    }}
                     onMouseDown={(e) => e.stopPropagation()}
                     onBlur={() => {
                       setEditingId(null);
                       setTexts((arr) => arr.filter((tt) => !(tt.id === t.id && !tt.text)));
+                      
+                      // ✨ Broadcast edit selesai
+                      socketRef.current?.emit("user-editing", {
+                        boardId,
+                        elementId: t.id,
+                        username: usernameRef.current,
+                        kind: "text",
+                        isEditing: false,
+                      });
                     }}
                     style={{ fontSize: t.size }}
                     className="w-full bg-transparent resize-none outline-none text-gray-800 font-semibold leading-snug"
@@ -667,6 +948,13 @@ function BoardPage() {
                     {t.text || <span className="text-gray-400">Double-click to edit</span>}
                   </p>
                 )}
+                
+                {/* ✨ Indicator: siapa yang sedang edit */}
+                {isEditingByOther && (
+                  <p className="text-xs text-blue-500 mt-1">
+                    ✏️ {usersEditing[t.id].username} sedang mengedit...
+                  </p>
+                )}
               </div>
               {isSelected && !isEditing && (
                 <button
@@ -675,6 +963,11 @@ function BoardPage() {
                     e.stopPropagation();
                     setTexts((arr) => arr.filter((tt) => tt.id !== t.id));
                     setSelectedId(null);
+                    socketRef.current?.emit("activity", {
+                      boardId,
+                      username: usernameRef.current,
+                      action: "deleted text",
+                    });
                   }}
                   className="absolute -top-4 -right-4 bg-white rounded-full shadow p-1 text-gray-500 hover:text-red-500"
                 >
@@ -703,6 +996,11 @@ function BoardPage() {
                     e.stopPropagation();
                     setStamps((arr) => arr.filter((st) => st.id !== s.id));
                     setSelectedId(null);
+                    socketRef.current?.emit("activity", {
+                      boardId,
+                      username: usernameRef.current,
+                      action: "deleted emoji",
+                    });
                   }}
                   className="absolute -top-3 -right-3 bg-white rounded-full shadow p-0.5 text-gray-500 hover:text-red-500"
                 >
@@ -712,6 +1010,27 @@ function BoardPage() {
             </div>
           );
         })}
+
+        {/* Kursor user lain (realtime) */}
+        {Object.entries(remoteCursors).map(([socketId, cursor]) => (
+          <div
+            key={socketId}
+            className="absolute pointer-events-none z-50 transition-transform duration-75"
+            style={{ left: cursor.x, top: cursor.y }}
+          >
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <path
+                d="M2 2 L18 9 L11 11 L9 18 Z"
+                fill="#C86B85"
+                stroke="white"
+                strokeWidth="1.5"
+              />
+            </svg>
+            <span className="ml-4 -mt-1 inline-block bg-[#C86B85] text-white text-xs px-2 py-0.5 rounded-md whitespace-nowrap shadow">
+              {cursor.username}
+            </span>
+          </div>
+        ))}
       </div>
 
       {/* Header Left */}
@@ -735,20 +1054,64 @@ function BoardPage() {
         </p>
       </div>
 
-      {/* Header Right */}
+      {/* Header Right - WITH ONLINE USERS DROPDOWN */}
       <div className="absolute top-8 right-8 z-10">
-        <div className="bg-white rounded-2xl shadow-md h-[70px] px-5 flex items-center gap-4">
-          <div className="flex -space-x-3">
-            <div className="w-10 h-10 rounded-full bg-orange-400 border-2 border-white" />
-            <div className="w-10 h-10 rounded-full bg-blue-500 border-2 border-white flex items-center justify-center text-white">A</div>
-            <div className="w-10 h-10 rounded-full bg-green-500 border-2 border-white" />
+        <div className="bg-white rounded-2xl shadow-md h-[70px] px-5 flex items-center gap-4 relative">
+
+          {/* ✨ BARU: Online Users dengan Dropdown */}
+          <div className="relative">
+            <button
+              onClick={() => setShowOnlineDropdown(!showOnlineDropdown)}
+              className="flex -space-x-3 items-center hover:opacity-80"
+              title="Online users"
+            >
+              {onlineUsers.slice(0, 3).map((user, idx) => (
+                <div
+                  key={user.socketId}
+                  className="w-10 h-10 rounded-full bg-orange-400 border-2 border-white flex items-center justify-center text-white font-semibold text-sm"
+                >
+                  {user.username?.charAt(0).toUpperCase()}
+                </div>
+              ))}
+              {onlineUsers.length > 3 && (
+                <div className="w-10 h-10 rounded-full bg-gray-300 border-2 border-white flex items-center justify-center text-white font-semibold text-xs">
+                  +{onlineUsers.length - 3}
+                </div>
+              )}
+            </button>
+
+            {/* ✨ Dropdown Panel */}
+            {showOnlineDropdown && (
+              <div className="absolute top-full mt-2 right-0 bg-white rounded-xl shadow-lg p-3 min-w-[200px] border border-gray-100">
+                <p className="text-xs font-bold text-gray-600 mb-2 px-2">ONLINE NOW</p>
+                {onlineUsers.length === 0 ? (
+                  <p className="text-xs text-gray-400 text-center py-2">No one online</p>
+                ) : (
+                  <div className="space-y-1">
+                    {onlineUsers.map((user) => (
+                      <div
+                        key={user.socketId}
+                        className="flex items-center gap-2 px-2 py-1.5 hover:bg-gray-50 rounded text-sm"
+                      >
+                        <div className="w-6 h-6 rounded-full bg-orange-400 flex items-center justify-center text-white text-xs font-semibold">
+                          {user.username?.charAt(0).toUpperCase()}
+                        </div>
+                        <span className="text-gray-700 font-medium">{user.username}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
+
           <div className="w-px h-10 bg-gray-200" />
-          <div className="w-10 h-10 rounded-full bg-orange-400 flex items-center justify-center text-white">H</div>
-          <button className="bg-[#C86B85] text-white px-5 py-3 rounded-xl flex items-center gap-2 font-medium">
+
+          <button className="bg-[#C86B85] text-white px-5 py-3 rounded-xl flex items-center gap-2 font-medium hover:bg-[#b85a73]">
             <Share2 size={18} />
             Share
           </button>
+
         </div>
       </div>
 

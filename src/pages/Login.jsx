@@ -3,6 +3,7 @@ import { useState } from "react";
 import axios from "axios";
 import illustration from "../assets/login-illustration.png";
 import { User, Lock } from "lucide-react";
+import { API_URL } from "../config";
 
 export default function Login() {
   const [username, setUsername] = useState("");
@@ -21,11 +22,12 @@ export default function Login() {
 
     try {
       const res = await axios.post(
-        "http://localhost:5000/api/auth/login",
+        `${API_URL}/auth/login`,
         { username, password }
       );
 
       localStorage.setItem("token", res.data.token);
+      localStorage.setItem("username",res.data.user.username);
       localStorage.setItem("user", JSON.stringify(res.data.user));
 
       navigate("/dashboard");

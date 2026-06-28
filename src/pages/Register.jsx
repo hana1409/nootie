@@ -3,6 +3,7 @@ import { useState } from "react";
 import axios from "axios";
 import illustration from "../assets/login-illustration.png";
 import { Mail, Lock, User } from "lucide-react";
+import { API_URL } from "../config";
 
 export default function Register() {
   const [username, setUsername] = useState("");
@@ -22,7 +23,7 @@ export default function Register() {
 
     try {
       const res = await axios.post(
-        "http://localhost:5000/api/auth/register",
+        `${API_URL}/auth/register`,
         { username, email, password }
       );
 
